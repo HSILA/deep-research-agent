@@ -76,9 +76,13 @@ export default function App() {
 
   useEffect(() => {
     if (scrollAreaRef.current) {
-      const scrollViewport = scrollAreaRef.current.querySelector(
-        "[data-radix-scroll-area-viewport]"
-      );
+      const scrollViewport =
+        scrollAreaRef.current.querySelector(
+          "[data-slot=\"scroll-area-viewport\"]"
+        ) ||
+        scrollAreaRef.current.querySelector(
+          "[data-radix-scroll-area-viewport]"
+        );
       if (scrollViewport) {
         scrollViewport.scrollTop = scrollViewport.scrollHeight;
       }
