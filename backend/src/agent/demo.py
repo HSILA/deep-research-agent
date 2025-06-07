@@ -1,72 +1,66 @@
-"""Chainlit demo app for the research agent."""
+import asyncio
+from typing import Dict, Any, List
+
 import chainlit as cl
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
-from .graph import (
-    evaluate_research,
-    finalize_answer,
-    generate_query,
-    reflection,
-    web_research,
-)
-from .state import OverallState
 
-# Wrap existing functions with Chainlit step decorators for nice UI tracking
-generate_query_step = cl.step(name="Generate Queries", type="llm")(generate_query)
-web_research_step = cl.step(name="Web Research", type="tool")(web_research)
-reflection_step = cl.step(name="Reflection", type="llm")(reflection)
-finalize_answer_step = cl.step(name="Finalize Answer", type="llm")(finalize_answer)
+from agent.graph import generate_query, web_research, reflection, finalize_answer
+from agent.state import OverallState, QueryGenerationState, WebSearchState
+
+
+def _run_sync(func, *args, **kwargs):
+    """Run a blocking function in a thread."""
+    return asyncio.to_thread(func, *args, **kwargs)
+
+
+async def generate_query_step(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
+    return await _run_sync(generate_query, state, config)
+
+
+async def web_research_step(state: WebSearchState, config: RunnableConfig) -> OverallState:
+    return await _run_sync(web_research, state, config)
+
+
+async def reflection_step(state: OverallState, config: RunnableConfig) -> Dict[str, Any]:
+    return await _run_sync(reflection, state, config)
+
+
+async def finalize_answer_step(state: OverallState, config: RunnableConfig) -> Dict[str, Any]:
+    return await _run_sync(finalize_answer, state, config)
 
 
 @cl.on_message
-async def main(message: cl.Message) -> None:
-    """Run the research agent for the incoming user question."""
-    question = message.content
+async def on_message(message: cl.Message):
+    config = RunnableConfig()
+
     state: OverallState = {
-        "messages": [HumanMessage(content=question)],
+        "messages": [HumanMessage(content=message.content)],
         "search_query": [],
         "web_research_result": [],
         "sources_gathered": [],
-        "initial_search_query_count": 0,
-        "max_research_loops": 0,
+        "initial_search_query_count": 3,
+        "max_research_loops": 1,
         "research_loop_count": 0,
-        "reasoning_model": "",
+        "reasoning_model": "gemini-2.5-flash-preview-04-17",
     }
 
-    config = RunnableConfig(configurable={})
+    query_state = await generate_query_step(state, config)
 
-    # 1. Generate initial search queries
-    query_state = await cl.make_async(generate_query_step)(state, config)
-    state.update(query_state)
+    for idx, query in enumerate(query_state["query_list"]):
+        research_update = await web_research_step({"search_query": query, "id": str(idx)}, config)
+        for key, val in research_update.items():
+            if isinstance(val, list):
+                state.setdefault(key, [])
+                state[key] += val
+            else:
+                state[key] = val
 
-    # 2. Perform web research for each generated query
-    for idx, query in enumerate(state["query_list"]):
-        search_state = await cl.make_async(web_research_step)(
-            {"search_query": query["query"], "id": str(idx)},
-            config,
-        )
-        state["search_query"] += search_state["search_query"]
-        state["web_research_result"] += search_state["web_research_result"]
-        state["sources_gathered"] += search_state["sources_gathered"]
+    reflection_update = await reflection_step(state, config)
+    state.update(reflection_update)
 
-    # 3. Reflection loop to evaluate and possibly continue searching
-    while True:
-        reflection_state = await cl.make_async(reflection_step)(state, config)
-        state.update(reflection_state)
+    final = await finalize_answer_step(state, config)
+    answer = final["messages"][-1].content
 
-        decision = evaluate_research(reflection_state, config)
-        if decision == "finalize_answer":
-            break
-        for send in decision:
-            data = send.arg
-            loop_state = await cl.make_async(web_research_step)(data, config)
-            state["search_query"] += loop_state["search_query"]
-            state["web_research_result"] += loop_state["web_research_result"]
-            state["sources_gathered"] += loop_state["sources_gathered"]
-
-    # 4. Finalize the answer and respond to the user
-    final_state = await cl.make_async(finalize_answer_step)(state, config)
-    state.update(final_state)
-    final_answer = state["messages"][-1].content
-    await cl.Message(content=final_answer).send()
+    await cl.Message(content=answer).send()
