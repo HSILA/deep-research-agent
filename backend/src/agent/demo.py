@@ -46,10 +46,12 @@ async def on_message(message: cl.Message):
         "reasoning_model": "gemini-2.5-flash-preview-04-17",
     }
 
-    query_state = await generate_query_step(state, config)
+    async with cl.Step(name="Generate queries", type="run"):
+        query_state = await generate_query_step(state, config)
 
     for idx, query in enumerate(query_state["query_list"]):
-        research_update = await web_research_step({"search_query": query, "id": str(idx)}, config)
+        async with cl.Step(name=f"Web research {idx+1}", type="run"):
+            research_update = await web_research_step({"search_query": query, "id": str(idx)}, config)
         for key, val in research_update.items():
             if isinstance(val, list):
                 state.setdefault(key, [])
@@ -57,10 +59,17 @@ async def on_message(message: cl.Message):
             else:
                 state[key] = val
 
-    reflection_update = await reflection_step(state, config)
+    async with cl.Step(name="Reflection", type="run"):
+        reflection_update = await reflection_step(state, config)
     state.update(reflection_update)
 
-    final = await finalize_answer_step(state, config)
+    async with cl.Step(name="Finalize answer", type="run"):
+        final = await finalize_answer_step(state, config)
     answer = final["messages"][-1].content
 
-    await cl.Message(content=answer).send()
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in answer.split():
+        await msg.stream_token(token + " ")
+    await msg.update()
+
